@@ -1,0 +1,24 @@
+[project]
+name = "credit-ledger"
+version = "0.1.0"
+description = "Atomic, overdraft-proof, idempotent credit metering over Postgres. Extracted from PANTHEON."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Isaac Teague Frayling" }]
+keywords = ["metering", "billing", "credits", "idempotency", "postgres", "multi-tenant", "row-level-security"]
+dependencies = ["SQLAlchemy>=2.0"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://pantheonlabs.info"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["credit_ledger"]

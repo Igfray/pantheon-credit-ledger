@@ -1,0 +1,96 @@
+# credit-ledger
+
+**An atomic, overdraft-proof, idempotent credit ledger — for metering money on a pay-per-use or multi-tenant service.** ~150 lines of Python over Postgres. Extracted from [PANTHEON](https://pantheonlabs.info), a multi-tenant AI substrate, where it's the money path for autonomous AI agents that spend real credits on every turn.
+
+The interesting part isn't the size — it's that three properties that are usually gotten *subtly wrong* are each guaranteed by a single, boring database mechanism instead of application-level hope:
+
+| Property | How | Not by |
+|---|---|---|
+| **No overdraft, ever** — a balance can never go negative, even under a stampede of concurrent charges | one guarded `UPDATE … WHERE credits >= n` | `SELECT` then `UPDATE` (a race), or a mutex (doesn't survive multiple processes) |
+| **Exactly-once under retries** — a replayed charge (a Stripe webhook fired twice, a client retry) charges once | `UNIQUE(tenant_id, idempotency_key)` on an append-only ledger | de-duping in app code (another race) |
+| **Tenant isolation** — tenant A can't read or write tenant B's balance | Postgres row-level security, `FORCE`d | a `WHERE tenant_id = ?` you have to remember to add every time |
+
+## The core: one statement does the hard part
+
+A spend is a single guarded, atomic `UPDATE`:
+
+```sql
+UPDATE credit_balance
+   SET credits = credits - :n
+ WHERE tenant_id = :t AND credits >= :n
+RETURNING credits;
+```
+
+- The row lock **serialises** concurrent charges against the same tenant — no lost updates.
+- The `credits >= :n` guard makes overdraft **structurally impossible**: the charge either fully succeeds (a row comes back) or changes nothing (zero rows). There is no window between the check and the debit, because they're the same statement.
+
+That's the whole trick, and the test proves it: fire **100 concurrent spends of 1 credit against a balance of 50**, and *exactly 50* succeed — the balance lands at 0, never negative, with 50 ledger rows.
+
+```python
+# tests/test_metering.py
+def test_atomic_decrement_under_concurrency(engine, tenant):
+    metering.grant(tenant, 50, engine=engine)
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        results = list(ex.map(lambda _: metering.decrement(tenant, 1, engine=pool).ok, range(100)))
+    assert sum(results) == 50                              # exactly the balance, no more
+    assert metering.balance(tenant, engine=engine) == 0.0  # never negative
+```
+
+## Idempotency: the ledger *is* the dedup
+
+Every grant and spend appends a row to `credit_ledger`, which carries a `UNIQUE(tenant_id, idempotency_key)`. Pass an `idempotency_key` (a Stripe `event_id`, a request id) and a replay can't insert a second row — the database rejects it, and the code returns the *original* result marked `deduped=True`. Money is never double-counted, and a duplicate never surfaces as a 500.
+
+The subtle bit is the concurrent race: two identical charges arrive at once, both past the "already seen?" check, both try to insert. One wins; the other's `INSERT` violates the constraint, which **rolls back its whole transaction — including the decrement**. The loser then re-reads the ledger, finds the winner's row, and returns that. So a concurrent duplicate is a clean dedup, not a double-charge and not an error. There's a test for exactly this — 20 concurrent replays of one Stripe event → *one* credit applied, zero exceptions.
+
+## The correctness detail most people miss: fail loud, not phantom-success
+
+An `IntegrityError` after retries is ambiguous — it could be a genuine concurrent dedup (the winner committed, there's a ledger row), **or** it could be a foreign-key violation because the tenant doesn't exist (nothing landed). Reporting success in the second case would silently lose money. So the code disambiguates by re-reading the ledger: a row means real dedup → report success; no row means nothing happened → **fail loud** (`ok=False`). This came out of an adversarial self-audit of the substrate; it's the difference between "looks fine" and "correct."
+
+## The RLS footgun this quietly avoids
+
+Row-level security is only a guarantee if the writer is actually subject to it. Metering runs on a *privileged* app role (the money path is infrastructure), and on any managed Postgres that role is **not** `BYPASSRLS`. So before every transaction the code binds the tenant into a session variable the policy reads:
+
+```python
+c.execute(text("SELECT set_config('app.current_tenant', :t, true)"), {"t": tenant_id})
+```
+
+Skip this and, the moment RLS is enforced in production, the guarded `UPDATE` matches zero rows and the `INSERT`'s `WITH CHECK` fails — **billing silently bricks**, while every dev box (superuser, RLS bypassed) looks perfectly fine. Getting this right is the difference between a demo and something you'd run.
+
+## Why so little code
+
+The database does the concurrency, the atomicity, and the isolation. The code's entire job is to *use those primitives correctly* — bind the tenant, guard the decrement, key the ledger, and disambiguate the one genuinely-ambiguous failure. Fewer moving parts is the point, not an accident.
+
+## Use it
+
+```bash
+pip install -e .                       # SQLAlchemy is the only runtime dep
+createdb ledger && psql "$DATABASE_URL" -f schema.sql
+```
+
+```python
+from credit_ledger import metering
+
+metering.grant(tenant_id, 100, idempotency_key="stripe:evt:abc")  # top up (Stripe-retry-safe)
+c = metering.decrement(tenant_id, 1, reason="chat-turn")          # spend
+if not c.ok:
+    ...  # out of credits — nothing was charged
+metering.balance(tenant_id)                                       # -> float
+```
+
+Every function also takes an explicit `engine=` (for your own pool/lifecycle). `schema.sql` is the full Postgres schema including the RLS policies.
+
+## Run the tests
+
+```bash
+DATABASE_URL=postgresql://localhost/ledger pytest -q     # needs Postgres + schema.sql applied
+```
+
+The suite is the spec: overdraft impossibility under 100-way concurrency, idempotent spend and grant retries, concurrent Stripe-replay dedup, and rejection of non-positive grants (a negative "grant" would decrement a tenant — the primitive refuses it before touching the DB).
+
+## Context
+
+This is one self-contained piece of **[PANTHEON](https://pantheonlabs.info)** — a multi-tenant substrate for running AI agents safely on other people's money and data (tenancy + RLS isolation, a governed reasoning loop, an approval queue, this metering ledger, and a quality gate), designed and built solo. The live Studio at [pantheonlabs.info](https://pantheonlabs.info) runs on it; the flagship write-up is at [pantheonlabs.co.uk](https://pantheonlabs.co.uk). Built by Isaac Teague Frayling.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
