@@ -1,5 +1,7 @@
 # credit-ledger
 
+[![tests](https://github.com/Igfray/pantheon-credit-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Igfray/pantheon-credit-ledger/actions/workflows/ci.yml)
+
 **An atomic, overdraft-proof, idempotent credit ledger — for metering money on a pay-per-use or multi-tenant service.** ~150 lines of Python over Postgres. Extracted from [PANTHEON](https://pantheonlabs.info), a multi-tenant AI substrate, where it's the money path for autonomous AI agents that spend real credits on every turn.
 
 The interesting part isn't the size — it's that three properties that are usually gotten *subtly wrong* are each guaranteed by a single, boring database mechanism instead of application-level hope:
@@ -86,6 +88,14 @@ DATABASE_URL=postgresql://localhost/ledger pytest -q     # needs Postgres + sche
 ```
 
 The suite is the spec: overdraft impossibility under 100-way concurrency, idempotent spend and grant retries, concurrent Stripe-replay dedup, and rejection of non-positive grants (a negative "grant" would decrement a tenant — the primitive refuses it before touching the DB).
+
+## Design notes
+
+A few deliberate choices, and the answers to the sharp questions they invite:
+
+- **A failed (insufficient) charge records nothing — so a retry with the same key re-attempts. That's intended.** Idempotency dedups *successful effects*, not attempts. A charge rejected for insufficient balance didn't happen, so the same key should be free to succeed later — e.g. a metered webhook that hit a zero balance and is retried after a top-up. The dedup keys the *committed ledger row*, which only exists for charges that actually landed.
+- **`numeric(18,4)` in the database, `float` at the API boundary.** The stored balance and every ledger delta are exact decimals — no binary-float drift on the money itself. The functions return `float` for ergonomics, which is fine for integer-ish credits; if you were metering *actual currency*, return `Decimal` at the boundary too (a one-line change) so nothing rounds on the way out.
+- **Why two attempts is enough** (`for _attempt in range(2)`). Under N concurrent charges sharing one key, exactly one wins the `UNIQUE(tenant_id, idempotency_key)` insert and commits; every loser's `INSERT` raises, rolling back its whole transaction (decrement included). On the second pass the losers see the winner's now-committed ledger row in the "already seen?" read and return *that* — a clean dedup. A third attempt can't be needed: once the winner commits, the row is visible, so attempt two is always either the winner's own success or a loser's dedup. The re-read *after* the loop only exists to distinguish the genuinely-nothing-landed case (e.g. a foreign-key violation) — so a constraint error is never reported as phantom success.
 
 ## Context
 
