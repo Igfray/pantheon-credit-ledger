@@ -1,9 +1,9 @@
 # credit-ledger
 
 [![tests](https://github.com/Igfray/pantheon-credit-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Igfray/pantheon-credit-ledger/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/credit-ledger.svg)](https://pypi.org/project/credit-ledger/)
-[![Python](https://img.shields.io/pypi/pyversions/credit-ledger.svg)](https://pypi.org/project/credit-ledger/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/credit-ledger)](https://pypi.org/project/credit-ledger/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/credit-ledger/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 **An atomic, overdraft-proof, idempotent credit ledger — for metering money on a pay-per-use or multi-tenant service.** ~150 lines of Python over Postgres. Extracted from [PANTHEON](https://pantheonlabs.co.uk), a multi-tenant AI substrate, where it's the money path for autonomous AI agents that spend real credits on every turn.
 
