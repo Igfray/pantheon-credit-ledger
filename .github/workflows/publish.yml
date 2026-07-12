@@ -2,6 +2,9 @@ name: publish
 on:
   release:
     types: [published]
+  push:
+    tags: ["v*"]           # a version tag publishes the pyproject version
+  workflow_dispatch:        # or trigger manually from the Actions tab
 permissions:
   contents: read
 jobs:
