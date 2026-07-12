@@ -92,6 +92,19 @@ DATABASE_URL=postgresql://localhost/ledger pytest -q     # needs Postgres + sche
 
 The suite is the spec: overdraft impossibility under 100-way concurrency, idempotent spend and grant retries, concurrent Stripe-replay dedup, and rejection of non-positive grants (a negative "grant" would decrement a tenant — the primitive refuses it before touching the DB).
 
+## Benchmark: does it hold at load?
+
+There's a reproducible load benchmark in [`benchmarks/`](benchmarks/) — it fires thousands of concurrent charges at a **single** balance row (the worst case: every charge serialises on the same lock) and re-checks the invariant afterwards. A real run on stock Postgres 16 in Docker (durable commit per charge, 32 workers), 10,000 charges against a balance of 5,000:
+
+```
+throughput   ~1,100 charges/sec        p50 ~22 ms · p95 ~77 ms · p99 ~138 ms
+succeeded     5,000  (= the balance, exactly)      rejected 5,000 (insufficient)
+ledger rows   5,000  (one per real debit)          final balance 0.0 (never negative)
+INVARIANT HELD ✓
+```
+
+That's the *pessimal* number — one contended row, throughput bounded by a single durable round-trip. Charges spread across many tenants hit different rows and don't contend, so real throughput scales with Postgres, not this ceiling. The point isn't the speed; it's that under 10,000 racing charges colliding at the empty-balance boundary, not one overdrafts. See [`benchmarks/README.md`](benchmarks/README.md) for how to read it and run your own.
+
 ## Design notes
 
 A few deliberate choices, and the answers to the sharp questions they invite:
