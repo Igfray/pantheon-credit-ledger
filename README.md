@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/credit-ledger.svg)](https://pypi.org/project/credit-ledger/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-**An atomic, overdraft-proof, idempotent credit ledger — for metering money on a pay-per-use or multi-tenant service.** ~150 lines of Python over Postgres. Extracted from [PANTHEON](https://pantheonlabs.info), a multi-tenant AI substrate, where it's the money path for autonomous AI agents that spend real credits on every turn.
+**An atomic, overdraft-proof, idempotent credit ledger — for metering money on a pay-per-use or multi-tenant service.** ~150 lines of Python over Postgres. Extracted from [PANTHEON](https://pantheonlabs.co.uk), a multi-tenant AI substrate, where it's the money path for autonomous AI agents that spend real credits on every turn.
 
 The interesting part isn't the size — it's that three properties that are usually gotten *subtly wrong* are each guaranteed by a single, boring database mechanism instead of application-level hope:
 
