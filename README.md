@@ -79,7 +79,7 @@ metering.grant(tenant_id, 100, idempotency_key="stripe:evt:abc")  # top up (Stri
 c = metering.decrement(tenant_id, 1, reason="chat-turn")          # spend
 if not c.ok:
     ...  # out of credits — nothing was charged
-metering.balance(tenant_id)                                       # -> float
+metering.balance(tenant_id)                                       # -> Decimal (exact, never float)
 ```
 
 Every function also takes an explicit `engine=` (for your own pool/lifecycle). `schema.sql` is the full Postgres schema including the RLS policies.
@@ -110,12 +110,18 @@ That's the *pessimal* number — one contended row, throughput bounded by a sing
 A few deliberate choices, and the answers to the sharp questions they invite:
 
 - **A failed (insufficient) charge records nothing — so a retry with the same key re-attempts. That's intended.** Idempotency dedups *successful effects*, not attempts. A charge rejected for insufficient balance didn't happen, so the same key should be free to succeed later — e.g. a metered webhook that hit a zero balance and is retried after a top-up. The dedup keys the *committed ledger row*, which only exists for charges that actually landed.
-- **`numeric(18,4)` in the database, `float` at the API boundary.** The stored balance and every ledger delta are exact decimals — no binary-float drift on the money itself. The functions return `float` for ergonomics, which is fine for integer-ish credits; if you were metering *actual currency*, return `Decimal` at the boundary too (a one-line change) so nothing rounds on the way out.
+- **`numeric(18,4)` in the database, `Decimal` at the API boundary (since 0.2.0).** The stored balance and every ledger delta are exact decimals — and amounts are coerced to `Decimal` and *bound as `Decimal`* (never handed to Postgres as a float to cast), and balances are returned as `Decimal`. So money is exact end to end: fractional per-call pricing, balances past 2⁵³, and arithmetic on the returned value all stay precise. Pass amounts as `Decimal`/`int`/`str` (a `float` is accepted and coerced via `Decimal(str(x))`, but prefer `str`/`Decimal` so you never introduce float error before it reaches us).
 - **Why two attempts is enough** (`for _attempt in range(2)`). Under N concurrent charges sharing one key, exactly one wins the `UNIQUE(tenant_id, idempotency_key)` insert and commits; every loser's `INSERT` raises, rolling back its whole transaction (decrement included). On the second pass the losers see the winner's now-committed ledger row in the "already seen?" read and return *that* — a clean dedup. A third attempt can't be needed: once the winner commits, the row is visible, so attempt two is always either the winner's own success or a loser's dedup. The re-read *after* the loop only exists to distinguish the genuinely-nothing-landed case (e.g. a foreign-key violation) — so a constraint error is never reported as phantom success.
 
 ## Context
 
 This is one self-contained piece of **[PANTHEON](https://pantheonlabs.info)** — a multi-tenant substrate for running AI agents safely on other people's money and data (tenancy + RLS isolation, a governed reasoning loop, an approval queue, this metering ledger, and a quality gate), designed and built solo. The live Studio at [pantheonlabs.info](https://pantheonlabs.info) runs on it; the flagship write-up is at [pantheonlabs.co.uk](https://pantheonlabs.co.uk). Built by Isaac Teague Frayling.
+
+
+## Changelog
+
+- **0.2.0** — **`Decimal` end to end** (breaking): balances return `Decimal` and amounts are coerced to and bound as `Decimal`, instead of round-tripping money through `float`. The `numeric(18,4)` column was always exact; now the API boundary is too, so fractional pricing / large balances / arithmetic on the result can't pick up IEEE-754 error. `float` inputs are still accepted (coerced via `Decimal(str(x))`).
+- **0.1.0** — initial release.
 
 ## License
 

@@ -123,3 +123,17 @@ def test_grant_rejects_non_positive_amounts(bad):
     # before touching the DB — so the invariant lives at the money primitive, not only in each caller.
     with pytest.raises(ValueError):
         metering.grant("00000000-0000-0000-0000-000000000000", bad, reason="bad", engine="UNUSED")
+
+
+def test_balances_are_exact_decimals_no_float_drift(engine, tenant):
+    from decimal import Decimal
+
+    # 0.1 + 0.1 + 0.1 = 0.3 EXACTLY — the classic float trap (in IEEE-754 it's 0.30000000000000004). The whole
+    # reason the column is numeric(18,4) is to never let that near the money; the API must return Decimal, not float.
+    for _ in range(3):
+        r = metering.grant(tenant, "0.1", reason="frac", engine=engine)
+    assert isinstance(r.balance, Decimal)
+    assert r.balance == Decimal("0.3")
+    assert metering.balance(tenant, engine=engine) == Decimal("0.3")
+    d = metering.decrement(tenant, "0.05", engine=engine)
+    assert isinstance(d.balance, Decimal) and d.balance == Decimal("0.25")

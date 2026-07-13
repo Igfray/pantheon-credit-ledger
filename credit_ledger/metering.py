@@ -24,11 +24,20 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger("credit_ledger.metering")
+
+
+def _dec(x) -> Decimal:
+    """Coerce to Decimal for EXACT money math. `Decimal(str(x))`, not `Decimal(x)`, so a float like 0.1 becomes
+    Decimal('0.1') and not its binary-float expansion. The whole point of the numeric(18,4) column is to never
+    round money — so amounts are bound as Decimal, and balances are returned as Decimal, end to end (no float)."""
+    return x if isinstance(x, Decimal) else Decimal(str(x))
+
 
 # The Postgres GUC (session/txn variable) that carries the current tenant for row-level security.
 # Set per-transaction by _bind so writes on a non-BYPASSRLS role satisfy the tenant_isolation policy.
@@ -69,25 +78,26 @@ def _bind(c, tenant_id: str) -> None:
 @dataclass
 class Charge:
     ok: bool
-    balance: float
+    balance: Decimal                         # exact — the numeric(18,4) balance, never coerced through float
     deduped: bool = False
 
 
-def balance(tenant_id: str, *, engine=None) -> float:
+def balance(tenant_id: str, *, engine=None) -> Decimal:
     eng = engine or _engine()
     with eng.begin() as c:
         _bind(c, tenant_id)
         v = c.execute(text("SELECT credits FROM credit_balance WHERE tenant_id = :t"),
                       {"t": str(tenant_id)}).scalar()
-    return float(v) if v is not None else 0.0
+    return v if v is not None else Decimal("0")     # SQLAlchemy returns a numeric column as Decimal already
 
 
-def grant(tenant_id: str, amount: float, *, reason: str = "grant",
+def grant(tenant_id: str, amount, *, reason: str = "grant",
           idempotency_key: str | None = None, engine=None) -> Charge:
-    """Add credits. Idempotent on ``idempotency_key`` (e.g. a Stripe ``event_id``): a retried or
-    concurrently-replayed grant is a no-op, not a double-credit or a 500. The ledger's
-    ``UNIQUE(tenant_id, idempotency_key)`` is the real guarantee; the retry loop turns a racing
-    duplicate (which would otherwise surface an IntegrityError) into a clean dedup."""
+    """Add credits. `amount` may be a Decimal / int / str / float — it's coerced to Decimal and bound exactly.
+    Idempotent on ``idempotency_key`` (e.g. a Stripe ``event_id``): a retried or concurrently-replayed grant is a
+    no-op, not a double-credit or a 500. The ledger's ``UNIQUE(tenant_id, idempotency_key)`` is the real
+    guarantee; the retry loop turns a racing duplicate (which would surface an IntegrityError) into a clean dedup."""
+    amount = _dec(amount)
     if not amount > 0:                       # invariant at the primitive: a non-positive grant would
         raise ValueError(f"grant amount must be positive, got {amount!r}")  # decrement/brick a tenant.
     eng = engine or _engine()
@@ -100,7 +110,7 @@ def grant(tenant_id: str, amount: float, *, reason: str = "grant",
                                            "WHERE tenant_id=:t AND idempotency_key=:k"),
                                       {"t": str(tenant_id), "k": idempotency_key}).scalar()
                     if prior is not None:
-                        return Charge(ok=True, balance=float(prior), deduped=True)
+                        return Charge(ok=True, balance=prior, deduped=True)
                 bal = c.execute(text(
                     "INSERT INTO credit_balance (tenant_id, credits) VALUES (:t, :a) "
                     "ON CONFLICT (tenant_id) DO UPDATE SET credits = credit_balance.credits + :a, "
@@ -110,7 +120,7 @@ def grant(tenant_id: str, amount: float, *, reason: str = "grant",
                                "VALUES (:id,:t,:d,:r,:k,:b)"),
                           {"id": str(uuid.uuid4()), "t": str(tenant_id), "d": amount,
                            "r": reason, "k": idempotency_key, "b": bal})
-                return Charge(ok=True, balance=float(bal))
+                return Charge(ok=True, balance=bal)
         except IntegrityError:                        # a constraint blocked it — could be a concurrent
             continue                                  # same-key dedup OR an FK (no such tenant); decide below
     # Both attempts hit a constraint. If a ledger row exists for this key, it was a genuine concurrent
@@ -124,15 +134,17 @@ def grant(tenant_id: str, amount: float, *, reason: str = "grant",
                                    "WHERE tenant_id=:t AND idempotency_key=:k"),
                               {"t": str(tenant_id), "k": idempotency_key}).scalar()
     if prior is not None:
-        return Charge(ok=True, balance=float(prior), deduped=True)
+        return Charge(ok=True, balance=prior, deduped=True)
     log.error("grant did NOT land for tenant %s (key=%r) — no ledger row after retries (no such tenant?)",
               tenant_id, idempotency_key)
     return Charge(ok=False, balance=balance(tenant_id, engine=eng))
 
 
-def decrement(tenant_id: str, amount: float = 1.0, *, reason: str = "usage",
+def decrement(tenant_id: str, amount=1, *, reason: str = "usage",
               idempotency_key: str | None = None, engine=None) -> Charge:
-    """Atomically spend `amount` credits. Returns ok=False (no change) if insufficient."""
+    """Atomically spend `amount` credits (Decimal / int / str / float — coerced to Decimal, bound exactly).
+    Returns ok=False (no change) if insufficient."""
+    amount = _dec(amount)
     eng = engine or _engine()
     for _attempt in range(2):
         try:
@@ -143,7 +155,7 @@ def decrement(tenant_id: str, amount: float = 1.0, *, reason: str = "usage",
                                            "WHERE tenant_id=:t AND idempotency_key=:k"),
                                       {"t": str(tenant_id), "k": idempotency_key}).scalar()
                     if prior is not None:
-                        return Charge(ok=True, balance=float(prior), deduped=True)
+                        return Charge(ok=True, balance=prior, deduped=True)
                 bal = c.execute(text(
                     "UPDATE credit_balance SET credits = credits - :n, updated_at = now() "
                     "WHERE tenant_id = :t AND credits >= :n RETURNING credits"),
@@ -151,12 +163,12 @@ def decrement(tenant_id: str, amount: float = 1.0, *, reason: str = "usage",
                 if bal is None:                       # insufficient — no change
                     cur = c.execute(text("SELECT credits FROM credit_balance WHERE tenant_id=:t"),
                                     {"t": str(tenant_id)}).scalar()
-                    return Charge(ok=False, balance=float(cur) if cur is not None else 0.0)
+                    return Charge(ok=False, balance=cur if cur is not None else Decimal("0"))
                 c.execute(text("INSERT INTO credit_ledger (id, tenant_id, delta, reason, idempotency_key, balance_after) "
                                "VALUES (:id,:t,:d,:r,:k,:b)"),
                           {"id": str(uuid.uuid4()), "t": str(tenant_id), "d": -amount,
                            "r": reason, "k": idempotency_key, "b": bal})
-                return Charge(ok=True, balance=float(bal))
+                return Charge(ok=True, balance=bal)
         except IntegrityError:                        # concurrent same idempotency_key
             continue                                  # txn rolled back (incl. decrement); retry → dedup
     with eng.begin() as c:
@@ -166,4 +178,4 @@ def decrement(tenant_id: str, amount: float = 1.0, *, reason: str = "usage",
                           {"t": str(tenant_id), "k": idempotency_key}).scalar()
     if prior is None:                                    # IntegrityError but NO prior row → not a real dedup;
         return Charge(ok=False, balance=balance(tenant_id, engine=eng))   # don't report a phantom success
-    return Charge(ok=True, balance=float(prior), deduped=True)
+    return Charge(ok=True, balance=prior, deduped=True)

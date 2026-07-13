@@ -1,6 +1,6 @@
 [project]
 name = "credit-ledger"
-version = "0.1.0"
+version = "0.2.0"
 description = "Atomic, overdraft-proof, idempotent credit metering over Postgres. Extracted from PANTHEON."
 readme = "README.md"
 requires-python = ">=3.10"
